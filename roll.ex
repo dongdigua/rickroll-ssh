@@ -5,12 +5,21 @@ defmodule RickRoll do
   @rick "./astley80.full"
   @port 2233
 
+  def start() do
+    Logger.configure(level: :info)
+    :ok = :ssh.start()
+    IO.inspect :erlang.memory
+    accept()
+  end
+
   def accept() do
     # don't use :binary
     {:ok, socket} =
       :gen_tcp.listen(@port, [:inet6, packet: 0, active: false, reuseaddr: true])
     {:ok, _} =
-      Agent.start_link(fn -> %{} end, name: :kvs)
+      Agent.start_link(fn -> %{} end, name: :pubkey_store)
+    {:ok, _} =
+      RickRoll.KbInt.start()
     Logger.info("Listening on #{@port}")
     loop_acceptor(socket)
   end
@@ -18,18 +27,19 @@ defmodule RickRoll do
   defp loop_acceptor(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
     # 为了识别用户，得套一层 gen_tcp
+    Logger.info("Got victim #{inspect(client)}")
     :ssh.daemon(client, [
           system_dir: ~c"./ssh",
           id_string: ~c"SSH-2.0-OpenSSH_RickRoll",
           max_sessions: 1,
           shell: &roll(&1, client),
-          auth_methods: ~c"publickey,password",
-          # password is none
-          pwdfun: fn _,_ -> true end,
-          # log every key (note the module name is not aliased)
+          # keyboard-interactive for optional PoW
+          auth_methods: ~c"publickey,keyboard-interactive",
+          auth_method_kb_interactive_data: RickRoll.KbInt.kb_int_fun(client),
+          pwdfun: RickRoll.KbInt.pwdfun(client),
+          # log every key
           key_cb: {RickRoll.KeyCb, [client: client]},
         ])
-    Logger.info("Got victim #{inspect(client)}")
     loop_acceptor(socket)
   end
 
@@ -45,10 +55,49 @@ defmodule RickRoll do
       client = options[:key_cb_private][:client]
       encoded = :ssh_file.encode([{pk, [comment: user]}], :openssh_key) |> String.trim
       Logger.info(encoded)
-      Agent.update(:kvs, fn x ->
-        Map.update(x, client, [encoded], fn l -> [encoded|l] end)
+      Agent.update(:pubkey_store, fn state ->
+        Map.update(state, client, [encoded], fn l -> [encoded|l] end)
       end)
       false
+    end
+  end
+
+  defmodule KbInt do
+    @difficulty 4 # 0 to disable PoW
+    @prefix String.duplicate("0", @difficulty)
+
+    def start(), do: Agent.start_link(fn -> %{} end, name: __MODULE__)
+
+    def kb_int_fun(client) when @difficulty > 0 do
+      nonce = :crypto.strong_rand_bytes(16) |> :binary.encode_hex()
+      Agent.update(__MODULE__, fn state -> Map.put(state, client, nonce) end)
+      fn _,_,_ ->
+        {"Making sure you are a robot", "SM3('#{nonce}'+?) == #{@prefix}...", "? = ", true}
+      end
+    end
+
+    def kb_int_fun(_client) do
+      fn _,_,_ -> {"", "", "password: ", false} end
+    end
+
+    def pwdfun(client) when @difficulty > 0 do
+      nonce = Agent.get(__MODULE__, fn state -> state[client] end)
+      fn _,pass,_,_ ->
+        Agent.update(__MODULE__, fn state -> Map.delete(state, client) end)
+        Logger.info("PoW: #{pass}")
+        if String.starts_with?(:crypto.hash(:sm3, nonce <> List.to_string(pass)) |> :binary.encode_hex(), @prefix) do
+          true
+        else
+          :disconnect
+        end
+      end
+    end
+
+    def pwdfun(_client) do
+      fn user, pass ->
+        Logger.info("user: #{user} password: #{pass}")
+        true
+      end
     end
   end
 
@@ -60,23 +109,11 @@ defmodule RickRoll do
           {:error, :interrupted} ->
             IO.puts IO.ANSI.reset
             IO.puts "Your pubkeys:"
-            Agent.get(:kvs, fn x -> Map.get(x, client) end) |> Enum.each(&IO.puts(&1))
-            IO.puts "#{IO.ANSI.red}Identity noted. Expect a visit soon!"
-            IO.puts IO.ANSI.reset
+            Agent.get(:pubkey_store, fn x -> Map.get(x, client) end) |> Enum.each(&IO.puts(&1))
+            IO.puts "#{IO.ANSI.red}Identity noted. Expect a visit soon!#{IO.ANSI.reset}"
             Process.exit(parent, "")
         end
       end)
-      IO.write "#{IO.ANSI.cyan}Authenticating"
-      for _ <- 1..3 do
-        Process.sleep(300)
-        IO.write "."
-        Process.sleep(100)
-      end
-      IO.puts ""
-      IO.puts "#{IO.ANSI.green}Access Granted!"
-      Process.sleep(500)
-      IO.puts "#{IO.ANSI.light_red}SENDING SUPER SECRET DATA..."
-      Process.sleep(700)
 
       File.stream!(@rick, read_ahead: 16384 * 4)
       |> Stream.chunk_every(@frame_height)
@@ -91,7 +128,4 @@ defmodule RickRoll do
   end
 end
 
-Logger.configure(level: :info)
-:ok = :ssh.start()
-IO.inspect :erlang.memory
-RickRoll.accept()
+RickRoll.start()

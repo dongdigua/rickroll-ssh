@@ -48,3 +48,5 @@ here's a table of different regexp
 | `(?i)rickroll$`             | 1099511627776 |
 | `rickroll`                  | 7607431802990 |
 
+so the current vanityssh-go is too slow
+then it's another story https://github.com/dongdigua/vanityssh-cl
