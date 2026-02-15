@@ -13,7 +13,7 @@ defmodule RickRoll do
   end
 
   def accept() do
-    # don't use :binary
+    # inet6 is fine since OS uses dual-stack
     {:ok, socket} =
       :gen_tcp.listen(@port, [:inet6, packet: 0, active: false, reuseaddr: true])
     {:ok, _} =
@@ -27,19 +27,22 @@ defmodule RickRoll do
   defp loop_acceptor(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
     # 为了识别用户，得套一层 gen_tcp
-    Logger.info("Got victim #{inspect(client)}")
-    :ssh.daemon(client, [
-          system_dir: ~c"./ssh",
-          id_string: ~c"SSH-2.0-OpenSSH_RickRoll",
-          max_sessions: 1,
-          shell: &roll(&1, client),
-          # keyboard-interactive for optional PoW
-          auth_methods: ~c"publickey,keyboard-interactive",
-          auth_method_kb_interactive_data: RickRoll.KbInt.kb_int_fun(client),
-          pwdfun: RickRoll.KbInt.pwdfun(client),
-          # log every key
-          key_cb: {RickRoll.KeyCb, [client: client]},
-        ])
+    pid = spawn(fn ->
+      Logger.info("Got victim #{inspect(client)}")
+      :ssh.daemon(client, [
+            system_dir: ~c"./ssh",
+            id_string: ~c"SSH-2.0-OpenSSH_RickRoll",
+            max_sessions: 1,
+            shell: &roll(&1, client),
+            # keyboard-interactive for optional PoW
+            auth_methods: ~c"publickey,keyboard-interactive",
+            auth_method_kb_interactive_data: RickRoll.KbInt.kb_int_fun(client),
+            pwdfun: RickRoll.KbInt.pwdfun(client),
+            # log every key
+            key_cb: {RickRoll.KeyCb, [client: client]},
+          ])
+    end)
+    :gen_tcp.controlling_process(client, pid) # socket ownership
     loop_acceptor(socket)
   end
 
@@ -106,7 +109,7 @@ defmodule RickRoll do
       parent = self()
       spawn(fn ->
         case IO.gets("") do
-          {:error, :interrupted} ->
+          {:error, reason} when reason in [:interrupted, :terminated] ->
             IO.puts IO.ANSI.reset
             IO.puts "Your pubkeys:"
             Agent.get(:pubkey_store, fn x -> Map.get(x, client) end) |> Enum.each(&IO.puts(&1))

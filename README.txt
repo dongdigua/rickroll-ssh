@@ -1,6 +1,6 @@
 rickroll-ssh
 
-A simple elixir script for rickrolling random users and bots
+A simple elixir ssh server for rickrolling random users and bots
 
 ref:
 - https://github.com/keroserene/rickrollrc
